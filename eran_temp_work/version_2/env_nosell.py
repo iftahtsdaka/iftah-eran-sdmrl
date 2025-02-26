@@ -3,7 +3,6 @@
 # general
 # -----------------------
 import os
-
 # -----------------------
 # Gymnasium
 # -----------------------
@@ -19,7 +18,6 @@ from stable_baselines3 import DQN
 from stable_baselines3.common.evaluation import evaluate_policy
 from stable_baselines3.common.env_util import make_vec_env
 
-
 # -----------------------
 # Global Constants
 # -----------------------
@@ -27,7 +25,12 @@ TOTAL_DAILY_DEMAND = 1000
 PENALTY_PER_WATER_UNIT = 1000
 AGENT_WATER_VOLUME_MAX = 300
 HOURS_IN_A_WEEK = 168
-
+PRICE_A = 1 # base price A
+PREMIUM_FACTOR = 2 # how much a price get pricer on expensive hours
+PRICE_A_PREMIUM = PREMIUM_FACTOR * PRICE_A # price A on expensive hours
+PRICE_B_FACTOR = 1.5 # how much base price B is pricier than price A
+PRICE_B = PRICE_B_FACTOR * PRICE_A # base price B
+PRICE_B_PREMIUM = PREMIUM_FACTOR * PRICE_B # price B on expensive hours
 # -----------------------
 # Helper Functions
 # -----------------------
@@ -40,6 +43,10 @@ def default_price_function(amount_to_buy, base_price):
                PENALTY_PER_WATER_UNIT)
 
 def get_hourly_demand_pattern():
+    """
+    Returns 168 array of demands first 6 days sums to TOTAL_DAILY_DEMAND demand. 
+    The last day sums to TOTAL_DAILY_DEMAND / 2 
+    """
     hourly_demand = np.array([2, 2, 2, 2, 3, 5, 10, 12, 10, 8, 6, 5, 5, 5, 5, 6, 7, 9, 10, 9, 6, 4, 3, 2])
     hourly_demand = (hourly_demand / hourly_demand.sum()) * TOTAL_DAILY_DEMAND
     # For a week: 6 full days and 1 day at half demand
@@ -47,13 +54,17 @@ def get_hourly_demand_pattern():
     return hourly_demand
 
 def sample_demand(hour, std=10):
+    """ Sample[hour]: base hourly demand + normal noise """
     pattern = get_hourly_demand_pattern()
     mean_demand = pattern[hour]
     return max(0, np.random.normal(mean_demand, std))
 
 def get_water_prices(hours):
-    base_prices = np.ones(24)
-    base_prices[8:16] = 2  # More expensive between 8:00 and 16:00
+    """
+    Hourly prices over a day, 8am-4pm more expensive
+    """
+    base_prices = np.ones(24) * PRICE_A
+    base_prices[8:16] = PRICE_A_PREMIUM  # More expensive between 8:00 and 16:00
     base_prices = np.tile(base_prices, 7)[:hours]
     return base_prices
 
@@ -64,56 +75,97 @@ class SimplifiedWaterSupplyEnv(gym.Env):
     def __init__(self,
                  max_cycles=10,
                  hours_per_cycle=HOURS_IN_A_WEEK,
-                 time_bucket_count=168,
-                 water_bucket_count=300,
+                 time_bucket_count=HOURS_IN_A_WEEK,
+                 water_bucket_count=AGENT_WATER_VOLUME_MAX,
+                 discrete_observations = False,
+                 discrete_actions = False,
                  price_function=default_price_function):
         """
-        max_cycles: number of cycles (e.g., weeks)
-        hours_per_cycle: number of hours in one cycle (e.g., 168)
+        max_cycles: number of cycles (e.g. weeks)
+        hours_per_cycle: number of hours in one cycle (e.g. 168)
         time_bucket_count: discrete time steps per cycle (aggregated from hours)
         water_bucket_count: number of discrete water/demand levels
         price_function: function for computing water cost
+
+        Note: Simplifying by using buckets is only relevant for discrete,
+        as continus has infinite number of options in any case!
         """
         super(SimplifiedWaterSupplyEnv, self).__init__()
-        self.max_cycles = max_cycles
+        self.max_cycles = max_cycles # Finite horizon
         self.hours_per_cycle = hours_per_cycle
         self.time_bucket_count = time_bucket_count
+        self.discrete_observations = discrete_observations
+        self.discrete_actions = discrete_actions
         self.price_function = price_function
 
-        # How many original hours per bucket?
-        self.aggregation_interval = hours_per_cycle // time_bucket_count
+        # Time Interval size: How many original hours per bucket? 
+        self.aggregation_interval = hours_per_cycle / time_bucket_count
 
         # Determine the bucket size for water/demand.
         self.water_bucket_count = water_bucket_count
         self.water_bucket_size = AGENT_WATER_VOLUME_MAX / water_bucket_count
 
+    
         # Observation: [water_level, price_A, price_B, demand, current_time_bucket]
-        self.observation_space = spaces.Box(low=0, high=np.inf, shape=(5,), dtype=np.float32)
+
+        # - water_level: [0,300] float
+        # - price_A: [1,2] float
+        # - price_B: [1.5,3] float
+        # - demand: [0,inf) float
+        # - current_time_bucket: [0, time_bucket_count]
+
+        low_bounds = np.array([
+            0,    # water_level min
+            PRICE_A,    # price_A min
+            PRICE_B,  # price_B min
+            0,    # demand min
+            0     # current_time_bucket min
+        ], dtype=np.float32)
+
+        high_bounds = np.array([
+            AGENT_WATER_VOLUME_MAX,                # water_level max
+            PRICE_A_PREMIUM,                  # price_A max
+            PRICE_B_PREMIUM,                  # price_B max
+            AGENT_WATER_VOLUME_MAX,             # demand max (assumed)
+            self.time_bucket_count  # current_time_bucket max
+        ], dtype=np.float32)
+
+        self.observation_space = spaces.Box(low=low_bounds, high=high_bounds, dtype=np.float32)
+
         # Action: how much water to buy from each source (continuous; later wrapped to discrete)
         self.action_space = spaces.Box(low=0, high=AGENT_WATER_VOLUME_MAX, shape=(2,), dtype=np.float32)
 
         # Pre-compute hourly prices and then aggregate them into time buckets.
         self.base_hourly_prices = get_water_prices(hours_per_cycle)
-        self.source_A_base_prices = self._aggregate_prices(self.base_hourly_prices)
+        # Price B is more expensive than Price A
+        # self.source_A_base_prices = self._aggregate_prices(self.base_hourly_prices) # Simplify the Env
+        self.source_A_base_prices =self.base_hourly_prices[::int(self.aggregation_interval)]
         self.source_B_base_prices = 1.5 * self.source_A_base_prices
 
         self.reset()
 
     def _aggregate_prices(self, hourly_prices):
-        """Aggregate hourly prices into time buckets by averaging."""
+        """Aggregate (by Averaging) hourly prices into time buckets."""
         aggregated = []
         for i in range(self.time_bucket_count):
-            start = i * self.aggregation_interval
-            end = (i + 1) * self.aggregation_interval
+            start = int(i * self.aggregation_interval)
+            end = int((i + 1) * self.aggregation_interval)
             agg_price = np.mean(hourly_prices[start:end])
             aggregated.append(agg_price)
         return np.array(aggregated)
 
     def _aggregate_demand(self, start_hour):
-        """Aggregate demand over the time bucket and discretize it."""
-        demands = [sample_demand(h % self.hours_per_cycle) for h in range(start_hour, start_hour + self.aggregation_interval)]
+        """Aggregate (by Averaging) demand over the time bucket and discretize it."""
+        demands = [sample_demand(
+            h % self.hours_per_cycle
+            ) 
+            for h in range(
+                start_hour, 
+                start_hour + 
+                int(self.aggregation_interval)
+                )]
         avg_demand = np.mean(demands)
-        return discretize(avg_demand, self.water_bucket_size)
+        return avg_demand
 
     def reset(self, seed=None, options=None):
         super().reset(seed=seed)
@@ -121,7 +173,9 @@ class SimplifiedWaterSupplyEnv(gym.Env):
         self.current_time_bucket = 0
 
         # Start with full water (discretized)
-        self.water_level = discretize(AGENT_WATER_VOLUME_MAX, self.water_bucket_size)
+        self.water_level = AGENT_WATER_VOLUME_MAX
+        if self.discrete_observations:
+            self.water_level = discretize(self.water_level, self.water_bucket_size)
         self.total_reward = 0.0
 
         # Initialize demand and prices for the first time bucket
@@ -129,7 +183,11 @@ class SimplifiedWaterSupplyEnv(gym.Env):
         self.price_A = self.source_A_base_prices[self.current_time_bucket]
         self.price_B = self.source_B_base_prices[self.current_time_bucket]
         return self._get_obs(), self._get_info()
+    
+    def get_raw_demands(self):
+       return [self._aggregate_demand(i) for i in range(self.time_bucket_count)]
 
+        
     def step(self, action):
         buy_from_A, buy_from_B = action
 
@@ -146,7 +204,9 @@ class SimplifiedWaterSupplyEnv(gym.Env):
 
         # Add purchased water and re-discretize
         self.water_level += (buy_from_A + buy_from_B)
-        self.water_level = discretize(self.water_level, self.water_bucket_size)
+        self.water_level = min(self.water_level, AGENT_WATER_VOLUME_MAX)
+        if self.discrete_observations:
+            self.water_level = discretize(self.water_level, self.water_bucket_size)
 
         reward = - cost_A - cost_B - unmet_demand_penalty
         self.total_reward += reward
@@ -160,8 +220,10 @@ class SimplifiedWaterSupplyEnv(gym.Env):
         done = self.current_cycle >= self.max_cycles
 
         if not done:
-            start_hour = self.current_time_bucket * self.aggregation_interval
+            start_hour = self.current_time_bucket * int(self.aggregation_interval)
             self.demand = self._aggregate_demand(start_hour)
+            if self.discrete_observations:
+                self.demand = discretize(self.demand, self.water_bucket_size)
             self.price_A = self.source_A_base_prices[self.current_time_bucket]
             self.price_B = self.source_B_base_prices[self.current_time_bucket]
 
@@ -196,7 +258,7 @@ class DiscreteActions(gym.ActionWrapper):
     """
     def __init__(self, env, max_water_volume=AGENT_WATER_VOLUME_MAX, size_of_purchase=10):
         super().__init__(env)
-        self.action_amount = max_water_volume // size_of_purchase + 1
+        self.action_amount = max_water_volume // size_of_purchase
         self.size_of_purchase = size_of_purchase
         # Flattened action space: two sources => action_amount^2 possible actions.
         self.action_space = spaces.Discrete(self.action_amount * self.action_amount)
@@ -214,17 +276,19 @@ class DiscreteObservation(gym.ObservationWrapper):
     Wraps the observation space into a single discrete index.
     Each component is discretized according to the provided resolutions.
     """
-    def __init__(self, env, water_level_resolution=10, price_resolution=1, demand_resolution=10, time_resolution=1):
+    def __init__(self, env, time_buckets, water_buckets):
         super().__init__(env)
-        self.water_level_resolution = water_level_resolution
-        self.price_resolution = price_resolution
-        self.demand_resolution = demand_resolution
-        self.time_resolution = time_resolution
+        self.water_buckets = water_buckets
+        # Assumer demand is always less than AGENT_WATER_VOLUME_MAX 
+        self.water_resolution = (AGENT_WATER_VOLUME_MAX+1) / (water_buckets) # how much water each discrete "water volume interval" holds
+        # self.time_resolution = (HOURS_IN_A_WEEK) / time_buckets # how much hour each dicrete interval represents
 
-        self.amount_of_water = AGENT_WATER_VOLUME_MAX // water_level_resolution + 1
-        self.amount_of_price = PENALTY_PER_WATER_UNIT // price_resolution + 1
-        self.amount_of_demand = TOTAL_DAILY_DEMAND // demand_resolution + 1
-        self.amount_of_time = self.env.time_bucket_count
+        # amount of intervals per feature
+        self.amount_of_water = water_buckets
+        self.amount_of_price = 2 # (price A: 1, 2.  Price B: 1.5, 3)
+        
+        self.amount_of_demand = water_buckets
+        self.amount_of_time = time_buckets
 
         # The flattened observation index
         self.observation_space = spaces.Discrete(self.amount_of_water * 
@@ -233,16 +297,26 @@ class DiscreteObservation(gym.ObservationWrapper):
                                                  self.amount_of_demand * 
                                                  self.amount_of_time)
 
+    def get_discreteobservationwarpper_info(self):
+        return {
+            "amount_of_water": self.amount_of_water,
+            "amount_of_price": self.amount_of_price,
+            "amount_of_demand": self.amount_of_demand,
+            "amount_of_time": self.amount_of_time,
+        }
+    
     def observation(self, observation):
         # observation: [water_level, price_A, price_B, demand, current_time_bucket]
+        #               0-300        1,2      1.5 3    0-300   timebucket
         water_level, price_A, price_B, demand, current_time_bucket = observation
-
-        water_idx = int(water_level // self.water_level_resolution)
-        price_A_idx = int(price_A // self.price_resolution)
-        price_B_idx = int(price_B // self.price_resolution)
-        demand_idx = int(demand // self.demand_resolution)
-        time_idx = int(current_time_bucket // self.time_resolution)
-
+        
+        assert demand <= AGENT_WATER_VOLUME_MAX, f"Assertion failed: demand={demand} exceeds AGENT_WATER_VOLUME_MAX ({AGENT_WATER_VOLUME_MAX})"
+        water_idx = int(water_level // self.water_resolution)
+        price_A_idx = 0 if price_A == PRICE_A else 1
+        price_B_idx = 0 if price_B == PRICE_B else 1
+        demand_idx = int(demand // self.water_resolution)
+        time_idx = int(current_time_bucket) # DELETE: // self.time_resolution)
+        
         discrete_obs = (
             water_idx +
             self.amount_of_water * (
@@ -259,33 +333,112 @@ class DiscreteObservation(gym.ObservationWrapper):
         return discrete_obs
     
 
+class NormalizeObservationWrapper(gym.ObservationWrapper):
+    """
+    Normalizes continuous observation features to [0,1]:
+        - water_level: [0,300]  -> normalized value = water_level / 300
+        - price_A: [1,2]       -> normalized value = (price_A - 1) / (2 - 1)
+        - price_B: [1.5,3]     -> normalized value = (price_B - 1.5) / (3 - 1.5)
+        - demand: [0, TOTAL_DAILY_DEMAND] -> normalized value = demand / TOTAL_DAILY_DEMAND
+        - current_time_bucket: [0, hours_per_cycle] -> normalized value = current_time_bucket / hours_per_cycle
+    """
+    def __init__(self, env, hours_per_cycle, discrete_observations):
+        super().__init__(env)
+        self.hours_per_cycle = hours_per_cycle
+        self.discrete_observations = discrete_observations
 
+        if not discrete_observations:
+            self.observation_space = spaces.Box(low=0, high=1,
+                                            shape=env.observation_space.shape,
+                                            dtype=np.float32)
+
+    def observation(self, obs):
+        if self.discrete_observations:
+            return obs
+        
+        water_level, price_A, price_B, demand, current_time = obs
+        norm_water = water_level / AGENT_WATER_VOLUME_MAX
+        norm_price_A = (price_A - PRICE_A) / (PREMIUM_FACTOR * PRICE_A - PRICE_A)
+        norm_price_B = (price_B - PRICE_B) / (PREMIUM_FACTOR * PRICE_B - PRICE_B)
+        norm_demand = demand / AGENT_WATER_VOLUME_MAX
+        norm_time = current_time / self.hours_per_cycle
+        return np.array([norm_water, norm_price_A, norm_price_B, norm_demand, norm_time],
+                        dtype=np.float32)
     
+
+class NormalizeActionWrapper(gym.ActionWrapper):
+    def __init__(self, env, discrete_actions):
+        super().__init__(env)
+        self.discrete_actions = discrete_actions
+
+        if not self.discrete_actions:
+            self.action_space= spaces.Box(low=0, high=1,
+                                            shape=env.action_space.shape,
+                                            dtype=np.float32)
+    def action(self, action):
+        buy_from_A, buy_from_B = action # ranges [0,1], [0,1] 
+        # convert to env value range [0,300]
+        buy_from_A = AGENT_WATER_VOLUME_MAX * buy_from_A
+        buy_from_B = AGENT_WATER_VOLUME_MAX * buy_from_B
+        return [buy_from_A, buy_from_B]
+        
+
+# create_env(time_buckets=5, water_buckets=5, discrete_observations=True, discrete_actions=True, normalize=False):
 # -----------------------
 # Environment Creation Function
 # -----------------------
-def create_env(time_buckets=5, water_buckets=5):
+def create_env(time_buckets=HOURS_IN_A_WEEK, water_buckets=AGENT_WATER_VOLUME_MAX, discrete_observations=True, discrete_actions=True, normalize=False):
     """
     time_buckets: number of discrete time steps per cycle (also hours_per_cycle).
     water_buckets: number of discrete water levels (e.g., 5 levels).
     """
     env = SimplifiedWaterSupplyEnv(
         max_cycles=5,
-        hours_per_cycle=time_buckets,          # each bucket represents one hour
+        hours_per_cycle=HOURS_IN_A_WEEK,       # How long is the original raw cycle (should remain 168)       
         time_bucket_count=time_buckets,        # number of time steps equals time_buckets
-        water_bucket_count=water_buckets - 1   # water_bucket_count divisions yield water_buckets levels
+        water_bucket_count=water_buckets,   # water_bucket_count divisions yield water_buckets levels
+        discrete_observations=discrete_observations,
+        discrete_actions=discrete_actions,
     )
-    # Determine the purchase increment: AGENT_WATER_VOLUME_MAX divided by (water_buckets - 1)
-    purchase_increment = AGENT_WATER_VOLUME_MAX // (water_buckets - 1)
+    # Determine the purchase increment unit
+    purchase_increment = AGENT_WATER_VOLUME_MAX // (water_buckets)
+    if discrete_actions:    
+        env = DiscreteActions(
+            env, 
+        max_water_volume=AGENT_WATER_VOLUME_MAX, 
+        size_of_purchase=purchase_increment
+        )
     
-    env = DiscreteActions(env, max_water_volume=AGENT_WATER_VOLUME_MAX, size_of_purchase=purchase_increment)
-    env = DiscreteObservation(
+    if discrete_observations:
+        env = DiscreteObservation(
         env,
-        water_level_resolution=purchase_increment,  # This yields 5 water levels: 0,75,150,225,300
-        price_resolution=250,                         # 1000//250 + 1 = 5 price buckets
-        demand_resolution=250,                        # 1000//250 + 1 = 5 demand buckets
-        time_resolution=1                             # each time bucket is one step
+        time_buckets=time_buckets,  
+        water_buckets=water_buckets,   
     )
+    
+    if normalize:
+        env = NormalizeObservationWrapper(
+            env,
+            hours_per_cycle=time_buckets,
+            discrete_observations=discrete_observations,
+        )
+
+        env = NormalizeActionWrapper(
+            env,
+            discrete_actions=discrete_actions,
+        )
+        
     return env
 
+
+# #DEMO
+# tb = 8
+# wb = 5
+
+# env = make_vec_env(lambda: create_env(
+#     time_buckets=tb,
+#     water_buckets=wb, 
+#     discrete_actions=True, 
+#     discrete_observations=True,
+#     ), n_envs=1)
 
