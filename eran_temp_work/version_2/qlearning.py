@@ -64,3 +64,23 @@ def tabular_q_learning(env, total_episodes=50000, learning_rate=0.1, gamma=0.99,
 
 
 
+class TabularQ():
+    def __init__(self, env):
+        n_states = env.observation_space.n
+        n_actions = env.action_space.n
+        self.Q = np.zeros((n_states, n_actions))
+    
+    def learn(self, env, total_episodes=50000, learning_rate=0.1, gamma=0.99,
+                       epsilon=1.0, epsilon_decay=0.995, min_epsilon=0.01):
+        self.Q, rewards_all_episodes = tabular_q_learning(env,
+                                                        total_episodes,
+                                                        learning_rate,
+                                                        gamma,
+                                                        epsilon,
+                                                        epsilon_decay,
+                                                        min_epsilon)
+        return rewards_all_episodes
+    
+    def predict(self, state):
+        return np.argmax(self.Q[state, :])
+
