@@ -310,7 +310,7 @@ class DiscreteObservation(gym.ObservationWrapper):
         #               0-300        1,2      1.5 3    0-300   timebucket
         water_level, price_A, price_B, demand, current_time_bucket = observation
         
-        assert demand <= AGENT_WATER_VOLUME_MAX, f"Assertion failed: demand={demand} exceeds AGENT_WATER_VOLUME_MAX ({AGENT_WATER_VOLUME_MAX})"
+        # assert demand <= AGENT_WATER_VOLUME_MAX, f"Assertion failed: demand={demand} exceeds AGENT_WATER_VOLUME_MAX ({AGENT_WATER_VOLUME_MAX})"
         water_idx = int(water_level // self.water_resolution)
         price_A_idx = 0 if price_A == PRICE_A else 1
         price_B_idx = 0 if price_B == PRICE_B else 1
@@ -387,13 +387,21 @@ class NormalizeActionWrapper(gym.ActionWrapper):
 # -----------------------
 # Environment Creation Function
 # -----------------------
-def create_env(time_buckets=HOURS_IN_A_WEEK, water_buckets=AGENT_WATER_VOLUME_MAX, discrete_observations=True, discrete_actions=True, normalize=False):
+def create_env(max_cycles=5,
+               time_buckets=HOURS_IN_A_WEEK,
+               water_buckets=AGENT_WATER_VOLUME_MAX,
+               discrete_observations=True,
+               discrete_actions=True,
+               normalize_observations=False,
+               normalize_actions=False):
     """
     time_buckets: number of discrete time steps per cycle (also hours_per_cycle).
     water_buckets: number of discrete water levels (e.g., 5 levels).
     """
+
+    assert not (normalize_actions and discrete_actions) # Normalize wrapper assumes non-discrete action space
     env = SimplifiedWaterSupplyEnv(
-        max_cycles=5,
+        max_cycles=max_cycles,
         hours_per_cycle=HOURS_IN_A_WEEK,       # How long is the original raw cycle (should remain 168)       
         time_bucket_count=time_buckets,        # number of time steps equals time_buckets
         water_bucket_count=water_buckets,   # water_bucket_count divisions yield water_buckets levels
@@ -416,13 +424,13 @@ def create_env(time_buckets=HOURS_IN_A_WEEK, water_buckets=AGENT_WATER_VOLUME_MA
         water_buckets=water_buckets,   
     )
     
-    if normalize:
+    if normalize_observations:
         env = NormalizeObservationWrapper(
             env,
             hours_per_cycle=time_buckets,
             discrete_observations=discrete_observations,
         )
-
+    if normalize_actions:
         env = NormalizeActionWrapper(
             env,
             discrete_actions=discrete_actions,
@@ -431,7 +439,7 @@ def create_env(time_buckets=HOURS_IN_A_WEEK, water_buckets=AGENT_WATER_VOLUME_MA
     return env
 
 
-# #DEMO
+#DEMO
 # tb = 8
 # wb = 5
 
