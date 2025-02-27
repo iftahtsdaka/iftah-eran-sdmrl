@@ -228,6 +228,7 @@ class SimplifiedWaterSupplyEnv(gym.Env):
             self.price_B = self.source_B_base_prices[self.current_time_bucket]
 
         return self._get_obs(), reward, done, False, self._get_info()
+    
 
     def _get_obs(self):
         return np.array([self.water_level, self.price_A, self.price_B, self.demand, self.current_time_bucket], dtype=np.float32)
@@ -269,7 +270,11 @@ class DiscreteActions(gym.ActionWrapper):
         return [from_source_1 * self.size_of_purchase, from_source_2 * self.size_of_purchase]
 
     def action(self, action):
+        if type(action) is tuple:
+            return action
         return self.action_to_quantity(action)
+    
+
 
 class DiscreteObservation(gym.ObservationWrapper):
     """
