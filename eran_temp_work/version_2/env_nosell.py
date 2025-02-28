@@ -165,8 +165,8 @@ class SimplifiedWaterSupplyEnv(gym.Env):
             rng=self.np_random,
             ) 
             for h in range(
-                start_hour, 
-                start_hour + 
+                int(start_hour), 
+                int(start_hour) + 
                 int(self.aggregation_interval)
                 )]
         avg_demand = np.mean(demands)
@@ -196,6 +196,7 @@ class SimplifiedWaterSupplyEnv(gym.Env):
 
     def step(self, action):
         buy_from_A, buy_from_B = action
+        self.current_time_bucket = int(self.current_time_bucket)
 
         # Calculate penalty for unmet demand
         unmet_demand = max(0, self.demand - self.water_level)
@@ -322,8 +323,6 @@ class DiscreteActions(gym.ActionWrapper):
         return [from_source_1 * self.size_of_purchase, from_source_2 * self.size_of_purchase]
 
     def action(self, action):
-        if type(action) is tuple:
-            return action
         return self.action_to_quantity(action)
     
 

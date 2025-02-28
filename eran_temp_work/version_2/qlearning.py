@@ -1,6 +1,5 @@
 import numpy as np
 import gymnasium as gym
-import optuna
 
 
 # Import your environment and wrappers
