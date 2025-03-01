@@ -1,5 +1,7 @@
 import numpy as np
 import gymnasium as gym
+from env_nosell import DiscreteObservation
+from env_nosell import DiscreteActions
 
 
 # Import your environment and wrappers
@@ -67,6 +69,10 @@ class TabularQ():
     def __init__(self, env):
         n_states = env.observation_space.n
         n_actions = env.action_space.n
+        self.observation_translator = DiscreteObservation(env,
+                                                env.unwrapped.time_bucket_count,
+                                                env.unwrapped.water_bucket_count)
+        self.action_translator = env.env
         self.Q = np.zeros((n_states, n_actions))
     
     def train(self, env, total_episodes=50000, learning_rate=0.1, gamma=0.99,
@@ -81,4 +87,6 @@ class TabularQ():
         return rewards_all_episodes
     
     def predict(self, state):
+        if not type(state) is int:
+            state = self.observation_translator.observation(state)
         return np.argmax(self.Q[state, :])

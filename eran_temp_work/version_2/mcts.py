@@ -5,9 +5,7 @@ import random
 import itertools
 from env_nosell import SimplifiedWaterSupplyEnv, create_env, DiscreteObservation
 import itertools
-from qlearning import TabularQ
-from gymnasium.spaces import MultiDiscrete
-
+from tqdm import tqdm
 
 
 def copy_water_env(env: SimplifiedWaterSupplyEnv):
@@ -23,7 +21,7 @@ def copy_water_env(env: SimplifiedWaterSupplyEnv):
 # ------------------------------
 # Environment Simulator Using the Real Environment
 # ------------------------------
-def env_simulator(env:SimplifiedWaterSupplyEnv, state, action, high_level_model):
+def simulate_next_step(env:SimplifiedWaterSupplyEnv, state, action, high_level_model):
     """
     Uses the actual environment to simulate one low-level step.    
     Args:
@@ -39,11 +37,11 @@ def env_simulator(env:SimplifiedWaterSupplyEnv, state, action, high_level_model)
     """
     # Restore environment to the given state
     env.unwrapped.set_state(state)
-    high_level_action = high_level_model.predict(env.observation_translator.observation(state))
+    high_level_action = high_level_model.predict_high_level_action(state)
     high_level_action = env.action(high_level_action)
     new_action = np.array(action) + np.array(high_level_action)
     # Execute the high-level action (for example, using the bin index directly)
-    observation, reward, done, truncated, info = env.unwrapped.step(new_action)
+    observation, reward, done, truncated, info = env.step(new_action)
     next_state = env.unwrapped.get_state()
 
     return next_state, reward, done
@@ -56,9 +54,10 @@ class MCTSNode:
         self.state = state
         self.parent = parent
         self.action = action  # The discrete action that led to this node
-        self.children = {}    # Mapping: action -> child node
+        self.children = {}
         self.visits = 0
         self.total_reward = 0.0
+        self.not_expanded = []
 
     def uct_score(self, c_param=1.41):
         if self.visits == 0:
@@ -68,17 +67,19 @@ class MCTSNode:
         return q_value + bonus
 
     def expand(self, available_actions, env, high_level_model, horizon, c_param=1.41):
-        for action in available_actions:
-            if action not in self.children:
-                next_state, reward, done = env_simulator(env, self.state, action, high_level_model)
-                child_node = MCTSNode(next_state, parent=self, action=action)
-                child_node.total_reward = reward
-                child_node.visits = 1
-                self.children[action] = child_node
-                return child_node
+        if self.not_expanded:
+            action = random.choice(self.not_expanded)
+            next_state, reward, done = simulate_next_step(env, self.state, action, high_level_model)
+            child_node = MCTSNode(next_state, parent=self, action=action)
+            child_node.total_reward = reward
+            child_node.visits = 1
+            self.children[action] = child_node
+            self.not_expanded = available_actions
+            self.not_expanded.remove(action)
+            return child_node
         return None
 
-def mcts_search(root_state, #TODO: add first high level model action
+def mcts_search(root_state,
                 env:SimplifiedWaterSupplyEnv,
                 initial_high_level_action,
                 high_level_model,
@@ -87,7 +88,7 @@ def mcts_search(root_state, #TODO: add first high level model action
                 horizon=5,
                 c_param=1.41):
     root = MCTSNode(root_state)
-    simulation_env = copy_water_env(env)
+    simulation_env = env
     root.visits = 1
         # Apply the initial high-level action first
     for low_level_action in available_actions:
@@ -98,9 +99,11 @@ def mcts_search(root_state, #TODO: add first high level model action
             # Compute the full action as the sum of the high-level component and the candidate low-level action.
             full_action = np.array(high_level_component) + np.array(low_level_action)
             # Take a step in the environment.
-            next_state, reward, done, truncated, info = simulation_env.unwrapped.step(full_action)
+            next_state, reward, done, truncated, info = simulation_env.step(full_action)
             # Create a child node from the result of this combined action.
-            child_node = MCTSNode(next_state, parent=root, action=low_level_action)
+            child_node = MCTSNode(state=simulation_env.unwrapped.get_state(),
+                                  parent=root,
+                                  action=low_level_action)
             child_node.total_reward = reward
             child_node.visits = 1
             root.children[low_level_action] = child_node
@@ -134,7 +137,7 @@ def mcts_search(root_state, #TODO: add first high level model action
         discount = 1.0
         for d in range(depth, horizon):
             action = random.choice(available_actions)
-            sim_state, reward, done = env_simulator(simulation_env, sim_state, action, high_level_model)
+            sim_state, reward, done = simulate_next_step(simulation_env, sim_state, action, high_level_model)
             sim_reward += discount * reward
             discount *= 0.95  # high-level discount factor
             if done:
@@ -163,8 +166,8 @@ class DiscretizedActionWrapper(gym.ActionWrapper):
         super().__init__(env)
         self.granularity = granularity
         buckets = self.unwrapped.water_bucket_count
-        self.available_actions = [item for item in itertools.product(np.arange(0, buckets, self.granularity),
-                                                                     np.arange(0, buckets, self.granularity))]
+        self.available_actions = list(itertools.product(np.arange(0, buckets, self.granularity),
+                                                                     np.arange(0, buckets, self.granularity)))
         
         self.action_space = gym.spaces.Discrete((buckets // granularity)**2)
         self.observation_translator = DiscreteObservation(env,
@@ -172,28 +175,65 @@ class DiscretizedActionWrapper(gym.ActionWrapper):
                                                 env.unwrapped.water_bucket_count)
     
     def action(self, action):
+        if type(action) in [np.ndarray, tuple]:
+            return action
         new_action = self.available_actions[action]
         return new_action
 
 class HighLevelTabularQ():
-    def predict(self, state):
+    def __init__(self,
+                 high_level_action_granularity,
+                 simulator: SimplifiedWaterSupplyEnv,
+                 mcts_iters=100,
+                 mcts_horizon=5,
+                 mcts_c=1.41
+                 ):
+        self.granularity=high_level_action_granularity
+        simulator = DiscretizedActionWrapper(simulator,
+                                            granularity=self.granularity)
+        self.simulator = copy_water_env(simulator)
+        self.mcts_available_actions = list(itertools.product(range(high_level_action_granularity),
+                                                             range(high_level_action_granularity)))
+        self.mcts_iters=mcts_iters
+        self.mcts_horizon=mcts_horizon
+        self.mcts_c=mcts_c
+
+    def predict_high_level_action(self, state):
         if not hasattr(self, "Q"):
             raise(RuntimeError("Please train the model before predicting"))
-        return np.argmax(self.Q[state, :])
+        
+        obs = state
+        obs = self.simulator.observation_translator.observation(state)
+        high_level_action = np.argmax(self.Q[obs, :])
+        return high_level_action
     
-    def tabular_q_learning(self, env, mcts_available_actions,
-                           total_episodes=50000, learning_rate=0.1, gamma=0.99,
-                           epsilon=1.0, epsilon_decay=0.995, min_epsilon=0.01):
+    def predict(self, state):            
+        high_level_action = self.predict_high_level_action(state)
+        action = mcts_search(state,
+                             self.simulator,
+                             high_level_action,
+                             self,
+                             self.simulator.available_actions,
+                             self.mcts_iters,
+                             self.mcts_horizon,
+                             self.mcts_c)
+
+        return action
+            
+    def tabular_q_learning(self, env, total_episodes=50000,
+                           learning_rate=0.1, gamma=0.99,
+                           epsilon=1.0, epsilon_decay=0.995,
+                           min_epsilon=0.01):
 
         # Retrieve number of states and actions from the wrapped environment.
         n_states = env.observation_space.n
         n_actions = env.action_space.n
 
         # Initialize Q-table with zeros
-        self.Q = np.zeros((n_states, n_actions))
+        self.Q = np.full((n_states, n_actions), -np.inf)
         rewards_all_episodes = []
 
-        for episode in range(total_episodes):
+        for episode in tqdm(range(total_episodes), desc="Episode"):
             state, _ = env.reset()
             done = False
             truncated = False
@@ -212,17 +252,17 @@ class HighLevelTabularQ():
                     env,
                     initial_high_level_action=action,
                     high_level_model=self,     
-                    available_actions=mcts_available_actions,
-                    n_iters=5,
-                    horizon=3)
-                
-                new_state, reward, done, truncated, info = env.unwrapped.step(mcts_action)
+                    available_actions=self.mcts_available_actions,
+                    n_iters=self.mcts_iters,
+                    horizon=self.mcts_horizon,
+                    c_param=self.mcts_c)
+                new_action = np.array(mcts_action) + np.array(env.action(action))
+                new_state, reward, done, truncated, info = env.step(new_action)
                 current_timestep += 1
                 total_reward += reward
-                observation = env.observation_translator.observation(new_state)
                 # Q-learning update rule
-                self.Q[state, action] += learning_rate * (reward + gamma * np.max(self.Q[observation, :]) - self.Q[state, action])
-                state = observation
+                self.Q[state, action] += learning_rate * (reward + gamma * np.max(self.Q[new_state, :]) - self.Q[state, action])
+                state = new_state
 
             # Decay epsilon
             epsilon = max(min_epsilon, epsilon * epsilon_decay)
@@ -230,15 +270,13 @@ class HighLevelTabularQ():
 
             if (episode + 1) % 100 == 0:
                 print(f"Episode {episode+1}: Total Reward = {total_reward}")
+        return self.Q, rewards_all_episodes
 
 
     def train(self, env, total_episodes=50000, learning_rate=0.1, gamma=0.99,
-                       epsilon=1.0, epsilon_decay=0.995, min_epsilon=0.01, granularity=10):
-        wrapped_env = DiscretizedActionWrapper(env, granularity=granularity)
-        mcts_available_actions = [item for item in itertools.product(range(granularity),
-                                                                           range(granularity))]
+                       epsilon=1.0, epsilon_decay=0.995, min_epsilon=0.01):
+        wrapped_env = DiscretizedActionWrapper(env, granularity=self.granularity)
         self.Q, rewards_all_episodes = self.tabular_q_learning(wrapped_env,
-                                                               mcts_available_actions,
                                                                 total_episodes,
                                                                 learning_rate,
                                                                 gamma,
@@ -246,10 +284,5 @@ class HighLevelTabularQ():
                                                                 epsilon_decay,
                                                                 min_epsilon)
         return rewards_all_episodes
-    
-    
-     
 
-
-        
         

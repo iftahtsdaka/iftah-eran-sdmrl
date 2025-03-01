@@ -23,7 +23,7 @@ from stable_baselines3.common.env_util import make_vec_env
 # Global Constants
 # -----------------------
 TOTAL_DAILY_DEMAND = 1000
-PENALTY_PER_WATER_UNIT = 10000000
+PENALTY_PER_WATER_UNIT = 100000
 AGENT_WATER_VOLUME_MAX = 300
 HOURS_IN_A_WEEK = 168
 PRICE_A = 1 # base price A
@@ -69,10 +69,13 @@ def get_water_prices(hours):
     base_prices = np.tile(base_prices, 7)[:hours]
     return base_prices
 
+
 # -----------------------
 # Simplified Environment
 # -----------------------
 class SimplifiedWaterSupplyEnv(gym.Env):
+    def normalize_reward(self, reward):
+        worst_cost = max(PENALTY_PER_WATER_UNIT * AGENT_WATER_VOLUME_MAX, )
     def __init__(self,
                  max_cycles=10,
                  hours_per_cycle=HOURS_IN_A_WEEK,
@@ -214,8 +217,8 @@ class SimplifiedWaterSupplyEnv(gym.Env):
         self.water_level = min(self.water_level, AGENT_WATER_VOLUME_MAX)
         if self.discrete_observations:
             self.water_level = discretize(self.water_level, self.water_bucket_size)
-
-        reward = - cost_A - cost_B - unmet_demand_penalty
+        
+        reward = -cost_A - cost_B - unmet_demand_penalty
         self.total_reward += reward
 
         # Advance the time bucket
@@ -323,6 +326,8 @@ class DiscreteActions(gym.ActionWrapper):
         return [from_source_1 * self.size_of_purchase, from_source_2 * self.size_of_purchase]
 
     def action(self, action):
+        if type(action) in [np.ndarray, tuple]:
+            return (self.size_of_purchase * action[0], self.size_of_purchase * action[1])
         return self.action_to_quantity(action)
     
 
@@ -437,6 +442,27 @@ class NormalizeActionWrapper(gym.ActionWrapper):
         buy_from_A = AGENT_WATER_VOLUME_MAX * buy_from_A
         buy_from_B = AGENT_WATER_VOLUME_MAX * buy_from_B
         return [buy_from_A, buy_from_B]
+    
+class NormalizeRewardWrapper(gym.RewardWrapper):
+    def __init__(self, env, epsilon=1e-8):
+        super().__init__(env)
+        self.running_mean = 0.0
+        self.running_var = 0.0
+        self.count = 0
+        self.epsilon = epsilon
+
+    def reward(self, reward):
+        self.count += 1
+        # Update running mean and variance
+        delta = reward - self.running_mean
+        self.running_mean += delta / self.count
+        delta2 = reward - self.running_mean
+        self.running_var += delta * delta2
+
+        # Calculate standard deviation (avoid division by zero)
+        std = np.sqrt(self.running_var / self.count) + self.epsilon
+        normalized_reward = (reward - self.running_mean) / std
+        return normalized_reward
         
 
 # create_env(time_buckets=5, water_buckets=5, discrete_observations=True, discrete_actions=True, normalize=False):
@@ -449,7 +475,8 @@ def create_env(max_cycles=5,
                discrete_observations=True,
                discrete_actions=True,
                normalize_observations=False,
-               normalize_actions=False):
+               normalize_actions=False,
+               normalize_rewards=False):
     """
     time_buckets: number of discrete time steps per cycle (also hours_per_cycle).
     water_buckets: number of discrete water levels (e.g., 5 levels).
@@ -493,6 +520,8 @@ def create_env(max_cycles=5,
             env,
             discrete_actions=discrete_actions,
         )
+    if normalize_rewards:
+        env=NormalizeRewardWrapper(env)
         
     return env
 
