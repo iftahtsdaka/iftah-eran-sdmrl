@@ -230,7 +230,7 @@ class HighLevelTabularQ():
         n_actions = env.action_space.n
 
         # Initialize Q-table with zeros
-        self.Q = np.full((n_states, n_actions), -np.inf)
+        self.Q = np.zeros((n_states, n_actions))
         rewards_all_episodes = []
 
         for episode in tqdm(range(total_episodes), desc="Episode"):

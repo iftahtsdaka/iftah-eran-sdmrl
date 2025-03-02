@@ -21,9 +21,11 @@ from stable_baselines3.common.env_util import make_vec_env
 
 # -----------------------
 # Global Constants
+
+
 # -----------------------
 TOTAL_DAILY_DEMAND = 1000
-PENALTY_PER_WATER_UNIT = 100000
+PENALTY_PER_WATER_UNIT = 1000
 AGENT_WATER_VOLUME_MAX = 300
 HOURS_IN_A_WEEK = 168
 PRICE_A = 1 # base price A
@@ -444,25 +446,11 @@ class NormalizeActionWrapper(gym.ActionWrapper):
         return [buy_from_A, buy_from_B]
     
 class NormalizeRewardWrapper(gym.RewardWrapper):
-    def __init__(self, env, epsilon=1e-8):
-        super().__init__(env)
-        self.running_mean = 0.0
-        self.running_var = 0.0
-        self.count = 0
-        self.epsilon = epsilon
-
     def reward(self, reward):
-        self.count += 1
-        # Update running mean and variance
-        delta = reward - self.running_mean
-        self.running_mean += delta / self.count
-        delta2 = reward - self.running_mean
-        self.running_var += delta * delta2
-
-        # Calculate standard deviation (avoid division by zero)
-        std = np.sqrt(self.running_var / self.count) + self.epsilon
-        normalized_reward = (reward - self.running_mean) / std
-        return normalized_reward
+        # The maximum reward in the environment is 0 and the minimum is when there is maximum demand and water level is 0
+        # meaning there is a penalty for every water unit.
+        max_penalty = PENALTY_PER_WATER_UNIT * AGENT_WATER_VOLUME_MAX
+        return (reward + max_penalty) / max_penalty
         
 
 # create_env(time_buckets=5, water_buckets=5, discrete_observations=True, discrete_actions=True, normalize=False):
