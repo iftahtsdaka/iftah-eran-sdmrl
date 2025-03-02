@@ -444,25 +444,20 @@ class NormalizeActionWrapper(gym.ActionWrapper):
         return [buy_from_A, buy_from_B]
     
 class NormalizeRewardWrapper(gym.RewardWrapper):
-    def __init__(self, env, epsilon=1e-8):
+    def __init__(self, env, max_samples):
         super().__init__(env)
-        self.running_mean = 0.0
-        self.running_var = 0.0
-        self.count = 0
-        self.epsilon = epsilon
-
+        self.rewards_memory = []
+        self.curret_samples_count = 0
+        self.max_samples = max_samples
     def reward(self, reward):
-        self.count += 1
-        # Update running mean and variance
-        delta = reward - self.running_mean
-        self.running_mean += delta / self.count
-        delta2 = reward - self.running_mean
-        self.running_var += delta * delta2
-
-        # Calculate standard deviation (avoid division by zero)
-        std = np.sqrt(self.running_var / self.count) + self.epsilon
-        normalized_reward = (reward - self.running_mean) / std
-        return normalized_reward
+        if self.count < self.max_samples:
+            self.count += 1
+            self.rewards_memory.append(reward)
+        else:
+            self.rewards_memory.pop(0)
+            self.rewards_memory.append(reward)
+        
+        return sum(self.rewards_memory) / len(self.rewards_memory)
         
 
 # create_env(time_buckets=5, water_buckets=5, discrete_observations=True, discrete_actions=True, normalize=False):
@@ -476,7 +471,8 @@ def create_env(max_cycles=5,
                discrete_actions=True,
                normalize_observations=False,
                normalize_actions=False,
-               normalize_rewards=False):
+               normalize_rewards=False,
+               reward_average_max_samples=50):
     """
     time_buckets: number of discrete time steps per cycle (also hours_per_cycle).
     water_buckets: number of discrete water levels (e.g., 5 levels).
@@ -521,7 +517,7 @@ def create_env(max_cycles=5,
             discrete_actions=discrete_actions,
         )
     if normalize_rewards:
-        env=NormalizeRewardWrapper(env)
+        env=NormalizeRewardWrapper(env, max_samples=reward_average_max_samples)
         
     return env
 
