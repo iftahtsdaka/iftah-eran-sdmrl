@@ -3,7 +3,7 @@
 This repository contains implementations for simulating a water supply environment and training reinforcement learning agents. The simulation is built using Gymnasium, and the project features both basic tabular Q-learning as well as an MCTS (Monte Carlo Tree Search) finetuning approach to improve decision making.
 
 ## Files
-
+All files are inside the "submit" directory
 - **Part1-2.ipynb**  
   A Jupyter Notebook that demonstrates experiments, analysis, and results on the water supply simulation environment.
 
