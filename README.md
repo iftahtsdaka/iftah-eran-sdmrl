@@ -7,8 +7,11 @@ This repository contains implementations for simulating a water supply environme
 - **Part1-2.ipynb**  
   A Jupyter Notebook that demonstrates experiments, analysis, and results on the water supply simulation environment.
 
+- **part 3.ipynb**  
+  A Jupyter Notebook that demonstrates experiments, analysis, and results of the novel approach on the water supply environment.
+
 - **qlearning.py**  
-  Contains a tabular Q-learning implementation along with a `TabularQ` class. This file demonstrates how to train a Q-learning agent on the water supply environment.
+  Contains a tabular Q-learning implementation along with a `TabularQ` class.
 
 - **env_nosell.py**  
   Implements the water supply simulation environment using Gymnasium. It includes:
@@ -16,9 +19,7 @@ This repository contains implementations for simulating a water supply environme
   - Several wrappers for discretizing and normalizing observations and actions, making the environment suitable for reinforcement learning.
 
 - **mcts_finetuned_model.py**  
-  Implements a Monte Carlo Tree Search (MCTS) that finetunes the decisions made by the Q-learning agent. This file introduces:
-  - The `MCTSFinetunedTabularQ` class, which integrates high-level planning (via MCTS) with low-level Q-learning to improve performance.
-  - Helper functions for simulating environment steps and performing MCTS.
+  Implements a Monte Carlo Tree Search (MCTS) finetuning approach for the Q-learning agent.
 
 ## Setup & Installation
 
@@ -28,8 +29,10 @@ Ensure you have the following Python packages installed:
 - gymnasium
 - stable-baselines3
 - tqdm
+- optuna
+- rliable
 
 You can install these packages using pip:
 
 ```bash
-pip install numpy gymnasium stable-baselines3 tqdm
+pip install numpy gymnasium stable-baselines3 tqdm optuna rliable
