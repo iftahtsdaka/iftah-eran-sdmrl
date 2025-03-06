@@ -186,7 +186,7 @@ class DiscretizedActionWrapper(gym.ActionWrapper):
         new_action = self.available_actions[action]
         return new_action
 
-class HighLevelTabularQ():
+class MCTSFinetunedTabularQ():
     def __init__(self,
                  high_level_action_granularity,
                  simulator: SimplifiedWaterSupplyEnv,
@@ -227,6 +227,7 @@ class HighLevelTabularQ():
         return action
             
     def tabular_q_learning(self, env, total_episodes=50000,
+                           high_level_policy_episodes_percentage=0.9,
                            learning_rate=0.1, gamma=0.99,
                            epsilon=1.0, epsilon_decay=0.995,
                            min_epsilon=0.01):
@@ -238,8 +239,34 @@ class HighLevelTabularQ():
         # Initialize Q-table with zeros
         self.Q = np.zeros((n_states, n_actions))
         rewards_all_episodes = []
+        high_level_policy_episodes = int(total_episodes * high_level_policy_episodes_percentage)
+        for episode in tqdm(range(high_level_policy_episodes),
+                            desc="training high level policy"):
+            state, _ = env.reset()
+            done = False
+            truncated = False
+            total_reward = 0
+            current_timestep = 0
 
-        for episode in tqdm(range(total_episodes), desc="Episode"):
+            while not done and not truncated:
+                # Epsilon-greedy action selection
+                if np.random.uniform(0, 1) < epsilon:
+                    action = env.action_space.sample()
+                else:
+                    action = np.argmax(self.Q[state, :])
+                
+                new_state, reward, done, truncated, info = env.step(action)
+                current_timestep += 1
+                total_reward = info['total_reward']
+                # Q-learning update rule
+                self.Q[state, action] += learning_rate * (reward + gamma * np.max(self.Q[new_state, :]) - self.Q[state, action])
+                state = new_state
+                
+            rewards_all_episodes.append(total_reward)
+            if (episode + 1) % 100 == 0:
+                print(f"Episode {episode+1}: Total Reward = {total_reward}")
+                
+        for episode in tqdm(range(int(total_episodes - high_level_policy_episodes)), desc="Low Level Policy"):
             state, _ = env.reset()
             done = False
             truncated = False
@@ -281,6 +308,7 @@ class HighLevelTabularQ():
 
     def train(self, env,
               total_episodes=50000,
+              high_level_policy_episodes_percentage = 0.9,
               learning_rate=0.1,
               gamma=0.99,
               epsilon=1.0,
@@ -288,13 +316,14 @@ class HighLevelTabularQ():
               min_epsilon=0.01,
               ):
         wrapped_env = DiscretizedActionWrapper(env, granularity=self.granularity)
-        self.Q, rewards_all_episodes = self.tabular_q_learning(wrapped_env,
-                                                                total_episodes,
-                                                                learning_rate,
-                                                                gamma,
-                                                                epsilon,
-                                                                epsilon_decay,
-                                                                min_epsilon)
+        self.Q, rewards_all_episodes = self.tabular_q_learning(env=wrapped_env,
+                                                                total_episodes=total_episodes,
+                                                                high_level_policy_episodes_percentage=high_level_policy_episodes_percentage,
+                                                                learning_rate=learning_rate,
+                                                                gamma=gamma,
+                                                                epsilon=epsilon,
+                                                                epsilon_decay=epsilon_decay,
+                                                                min_epsilon=min_epsilon)
         return rewards_all_episodes
 
         
